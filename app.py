@@ -390,7 +390,7 @@ else:
             wf = go.Figure(go.Waterfall(
                 x=[period_a, "Missing", "Duplicates", "New contracts", period_b],
                 measure=["absolute", "relative", "relative", "relative", "total"],
-                y=[2400, -int(n_miss), int(n_dup), 84, 0],
+                y=[400000, -int(n_miss), int(n_dup), 84, 0],
                 connector={"line": {"color": "#94A3B8"}},
                 decreasing={"marker": {"color": RED}},
                 increasing={"marker": {"color": GREEN}},
