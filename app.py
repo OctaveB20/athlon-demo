@@ -62,7 +62,7 @@ PERIODS = ["2024-12", "2025-03", "2025-06", "2025-09"]
 @st.cache_data
 def load_data() -> pd.DataFrame:
     rng = np.random.default_rng(42)
-    n = 2400
+    n = 400000
     country_w = [0.28, 0.17, 0.2, 0.14, 0.09, 0.07, 0.05]
     country = rng.choice(COUNTRIES, n, p=country_w)
     brand = rng.choice(BRANDS, n)
