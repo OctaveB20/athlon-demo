@@ -305,8 +305,7 @@ elif page == "🔗 Correlation analysis":
             st.plotly_chart(fig, width="stretch")
         with r:
             st.dataframe(
-                corr.style.format("{:.2f}").background_gradient(
-                    cmap="RdBu_r", vmin=-1, vmax=1),
+                corr.style.format("{:.2f}"),
                 width="stretch", height=300,
             )
             st.info(
