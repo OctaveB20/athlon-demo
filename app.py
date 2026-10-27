@@ -154,7 +154,7 @@ with st.sidebar:
     sel_brands = st.multiselect("Brand", BRANDS, default=BRANDS)
     sel_types = st.multiselect("Vehicle type", TYPES, default=TYPES)
     st.divider()
-    st.caption("Dataset: 2,400 contracts · 4 periods · demo data")
+    st.caption("Dataset: 400.000 contracts · 4 periods · demo data")
 
 df = df_all[
     df_all["country"].isin(sel_countries)
