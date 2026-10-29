@@ -59,34 +59,86 @@ TYPES = ["Passenger car", "SUV", "Van", "Electric", "Hybrid"]
 PERIODS = ["2024-12", "2025-03", "2025-06", "2025-09"]
 
 
-@st.cache_data
+def fmt(x) -> str:
+    """Thousands separated by a space, e.g. 400 000."""
+    return f"{int(x):,}".replace(",", " ")
+
+
+@st.cache_resource
 def load_data() -> pd.DataFrame:
-    rng = np.random.default_rng(42)
-    n = 400000
-    country_w = [0.28, 0.17, 0.2, 0.14, 0.09, 0.07, 0.05]
-    country = rng.choice(COUNTRIES, n, p=country_w)
-    brand = rng.choice(BRANDS, n)
-    vtype = rng.choice(TYPES, n, p=[0.3, 0.25, 0.15, 0.15, 0.15])
+    """Fake portfolio: uneven markets, skewed values, outliers, noise."""
+    rng = np.random.default_rng(2024)
+    n = 400_000
 
-    base_value = rng.normal(34000, 8000, n).clip(14000, 90000)
-    base_value *= np.where(vtype == "Electric", 1.25, 1.0)
-    base_value *= np.where(vtype == "Van", 0.95, 1.0)
-    duration = rng.choice([24, 36, 48, 60], n, p=[0.2, 0.4, 0.3, 0.1])
-    mileage = rng.normal(28000, 9000, n).clip(8000, 70000)
-    depreciation = (0.08 * duration / 12 + mileage / 400000
-                    + rng.normal(0, 0.03, n)).clip(0.1, 0.65)
-    residual = base_value * (1 - depreciation)
-    profit = (base_value * 0.045 - depreciation * 900
-              + rng.normal(0, 600, n))
+    # --- markets / brands: deliberately uneven ---------------------------
+    cw = np.array([0.263, 0.158, 0.221, 0.117, 0.083, 0.094, 0.064])
+    country = rng.choice(COUNTRIES, n, p=cw / cw.sum())
+    bw = np.array([0.27, 0.19, 0.16, 0.14, 0.13, 0.11])
+    brand = rng.choice(BRANDS, n, p=bw / bw.sum())
 
-    start = pd.to_datetime("2021-01-01") + pd.to_timedelta(
-        rng.integers(0, 1400, n), unit="D"
-    )
-    end = start + pd.to_timedelta(duration * 30.4, unit="D")
+    # --- vehicle type & duration mix differ by country --------------------
+    base_type = np.array([0.34, 0.22, 0.14, 0.12, 0.18])
+    base_dur = np.array([0.18, 0.41, 0.28, 0.13])
+    DURS = np.array([24, 36, 48, 60])
+    vtype = np.empty(n, dtype=object)
+    duration = np.empty(n, dtype=int)
+    for c in COUNTRIES:
+        m = country == c
+        vtype[m] = rng.choice(TYPES, m.sum(), p=rng.dirichlet(base_type * 35))
+        duration[m] = rng.choice(DURS, m.sum(), p=rng.dirichlet(base_dur * 30))
 
-    df = pd.DataFrame(
+    # --- group effects ----------------------------------------------------
+    c_val = dict(zip(COUNTRIES, [1.04, 1.02, 1.12, 0.97, 0.91, 0.94, 0.86]))
+    c_km = dict(zip(COUNTRIES, [0.92, 0.88, 1.10, 1.00, 1.05, 0.95, 1.18]))
+    c_dep = dict(zip(COUNTRIES, [-0.010, -0.005, -0.015, 0.008, 0.021, 0.014, 0.030]))
+    c_prof = dict(zip(COUNTRIES, [140, 60, 210, -40, -120, -70, -160]))
+    b_val = dict(zip(BRANDS, [1.18, 0.96, 1.05, 0.88, 1.32, 0.80]))
+    b_dep = dict(zip(BRANDS, [-0.020, 0.010, -0.005, 0.025, -0.035, 0.030]))
+    t_val = {"Passenger car": 1.0, "SUV": 1.14, "Van": 0.95,
+             "Electric": 1.27, "Hybrid": 1.08}
+    t_km = {"Passenger car": 1.0, "SUV": 0.97, "Van": 1.28,
+            "Electric": 0.84, "Hybrid": 0.95}
+    t_dep = {"Passenger car": 0.0, "SUV": -0.005, "Van": 0.015,
+             "Electric": 0.045, "Hybrid": -0.010}
+
+    ser = lambda a: pd.Series(a)
+    cs, bs, ts = ser(country), ser(brand), ser(vtype)
+
+    # --- values: right-skewed, with a few very expensive vehicles ---------
+    value = rng.lognormal(np.log(30500), 0.27, n)
+    value *= cs.map(c_val).to_numpy() * bs.map(b_val).to_numpy() * ts.map(t_val).to_numpy()
+    value *= rng.normal(1, 0.04, n)
+    value = value.clip(11000, 135000)
+
+    # --- mileage: gamma distributed, depends on country / type ------------
+    yearly_km = rng.gamma(6.0, 4300, n) * cs.map(c_km).to_numpy() * ts.map(t_km).to_numpy()
+    mileage = (yearly_km * duration / 12).clip(5000, 260000)
+
+    # --- depreciation: duration + mileage + group effects + noise ---------
+    dep = (0.08 + 0.065 * duration / 12 + mileage / 1.0e6
+           + cs.map(c_dep).to_numpy() + bs.map(b_dep).to_numpy()
+           + ts.map(t_dep).to_numpy()
+           + rng.normal(0, 0.045, n))
+    shock = rng.random(n) < 0.02                      # market shock / damage
+    dep = np.where(shock, dep + rng.uniform(0.05, 0.14, n), dep)
+    dep = dep.clip(0.08, 0.80)
+    residual = value * (1 - dep)
+
+    # --- profit: heavy tails, some losses ---------------------------------
+    profit = (value * 0.045 - dep * value * 0.07 + 150 * duration / 12
+              + cs.map(c_prof).to_numpy()
+              + rng.standard_t(4, n) * 620)
+
+    # --- dates: more recent contracts, small end-date drift ---------------
+    days = (rng.beta(2.2, 1.6, n) * 2200).astype(int)
+    start = pd.Timestamp("2019-06-01") + pd.to_timedelta(days, unit="D")
+    drift = rng.integers(-45, 46, n)
+    end = start + pd.to_timedelta(duration * 30.44 + drift, unit="D")
+
+    ids = 5_000_000 + np.cumsum(rng.integers(1, 40, n))   # irregular IDs
+    return pd.DataFrame(
         {
-            "contract_id": [f"CT-{100000 + i}" for i in range(n)],
+            "contract_id": ("CT-" + pd.Series(ids).astype(str)).to_numpy(),
             "country": country,
             "brand": brand,
             "vehicle_type": vtype,
@@ -94,36 +146,38 @@ def load_data() -> pd.DataFrame:
             "end_date": end.date,
             "duration_months": duration,
             "mileage_km": mileage.round(0),
-            "contract_value": base_value.round(0),
+            "contract_value": value.round(0),
             "residual_value": residual.round(0),
-            "depreciation_pct": (depreciation * 100).round(1),
+            "depreciation_pct": (dep * 100).round(1),
             "profit": profit.round(0),
         }
     )
-    return df
 
 
-@st.cache_data
+@st.cache_resource
 def load_reconciliation():
     """Static reconciliation result, identical on every run."""
     rng = np.random.default_rng(7)
     df = load_data()
+    n_total = len(df)
 
-    missing = df.sample(46, random_state=3).copy()
+    # anomalies are not spread evenly: some entities are much worse than others
+    country_f = pd.Series(rng.uniform(0.5, 1.9, len(COUNTRIES)), index=COUNTRIES)
+    w = df["country"].map(country_f).to_numpy()
+
+    missing = df.sample(int(n_total * 0.0031), weights=w, random_state=3).copy()
     missing["status"] = "Missing in newer period"
-    missing["last_seen_period"] = "2025-03"
     missing["comment"] = rng.choice(
         ["Not found in new extract", "End date matches, ID absent",
-         "Possible early termination"], len(missing))
+         "Possible early termination"], len(missing), p=[0.5, 0.3, 0.2])
 
-    dup = df.sample(31, random_state=11).copy()
+    dup = df.sample(int(n_total * 0.0017), weights=w ** 1.5, random_state=11).copy()
     dup["status"] = "Duplicate"
-    dup["occurrences"] = rng.choice([2, 2, 2, 3], len(dup))
     dup["comment"] = rng.choice(
         ["Same ID + same end date", "Double entry, different system",
-         "Re-booked after amendment"], len(dup))
+         "Re-booked after amendment"], len(dup), p=[0.55, 0.25, 0.20])
 
-    mismatch = df.sample(18, random_state=21).copy()
+    mismatch = df.sample(int(n_total * 0.0011), weights=w[::-1].copy(), random_state=21).copy()
     mismatch["status"] = "End date mismatch"
     mismatch["comment"] = "Same ID, end date changed between periods"
 
@@ -131,7 +185,7 @@ def load_reconciliation():
             "contract_value", "status", "comment"]
     out = pd.concat([missing[cols], dup[cols], mismatch[cols]],
                     ignore_index=True)
-    return out
+    return out.sample(frac=1, random_state=5).reset_index(drop=True)
 
 
 df_all = load_data()
@@ -154,7 +208,7 @@ with st.sidebar:
     sel_brands = st.multiselect("Brand", BRANDS, default=BRANDS)
     sel_types = st.multiselect("Vehicle type", TYPES, default=TYPES)
     st.divider()
-    st.caption("Dataset: 400.000 contracts · 4 periods · demo data")
+    st.caption(f"Dataset: {fmt(len(df_all))} contracts · 4 periods · demo data")
 
 df = df_all[
     df_all["country"].isin(sel_countries)
@@ -361,6 +415,8 @@ else:
                 "reconciliation.")
     else:
         res = recon_all[recon_all["country"].isin(scope)] if scope else recon_all
+        compared = int(df_all["country"].isin(scope).sum()) if scope else len(df_all)
+        n_new = int(compared * 0.012)
         n_miss = (res.status == "Missing in newer period").sum()
         n_dup = (res.status == "Duplicate").sum()
         n_mis = (res.status == "End date mismatch").sum()
@@ -368,10 +424,10 @@ else:
         st.success(f"Reconciliation complete: {period_a} ➜ {period_b}")
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Contracts compared", "2 400")
-        m2.metric("Missing contracts", n_miss)
-        m3.metric("Duplicate contracts", n_dup)
-        m4.metric("End date mismatches", n_mis)
+        m1.metric("Contracts compared", fmt(compared))
+        m2.metric("Missing contracts", fmt(n_miss))
+        m3.metric("Duplicate contracts", fmt(n_dup))
+        m4.metric("End date mismatches", fmt(n_mis))
 
         g1, g2 = st.columns(2)
         with g1:
@@ -390,14 +446,14 @@ else:
             wf = go.Figure(go.Waterfall(
                 x=[period_a, "Missing", "Duplicates", "New contracts", period_b],
                 measure=["absolute", "relative", "relative", "relative", "total"],
-                y=[2400, -int(n_miss), int(n_dup), 84, 0],
+                y=[compared, -int(n_miss), int(n_dup), n_new, 0],
                 connector={"line": {"color": "#94A3B8"}},
                 decreasing={"marker": {"color": RED}},
                 increasing={"marker": {"color": GREEN}},
                 totals={"marker": {"color": NAVY}},
             ))
             wf.update_layout(title="Contract count bridge", height=400,
-                             yaxis_range=[2300, 2500])
+                             yaxis_range=[compared - 3 * n_new, compared + 1.4 * n_new])
             st.plotly_chart(wf, width="stretch")
 
         st.markdown("### Detail of flagged contracts")
